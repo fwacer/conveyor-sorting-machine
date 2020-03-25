@@ -31,7 +31,7 @@
 #define TOGGLE_DIRECTION 0 // Change to 1 if conveyor is turning the wrong way
 
 // GLOBALS
-volatile unsigned char ADC_result; // may need to use a larger format for 10-bit **** TODO
+volatile unsigned int ADC_result = 0xFF;
 volatile char flagADCBusy = 0;
 volatile char flagProcessing = 0; // Flag to show that the current item is not yet identified
 volatile char flagPause = 0; // 1 for pause or un-pause
@@ -84,11 +84,12 @@ int main(int argc, char *argv[])
 	// waitToStart(); // Waits for a button press to start. Maybe unnecessary
 	while(1) // Event loop
 	{
-		// Check OR==high? (optical sensor #1) (Pin F2)
-		if(((PINF>>2)&1)==1){
+		// Check OR==high? (optical sensor #1) (Pin D1)
+		if((PIND & 0x01)==0x01){
 			if(!flagADCBusy && !flagConveyorStopped){ // Run a new ADC if it is available and conveyor is moving
 				flagADCBusy = 1;
 				flagProcessing = 1; // Lets us know that we currently are trying to identify an object
+				ADC_result = 0xFF; // Reset value to highest number
 				ADCSRA |= _BV(ADSC); // Triggers new conversion
 			}
 		}else{ // If object has left optical sensor, it's time to identify the material
@@ -201,24 +202,28 @@ void initPWM(){
 void hwInterrupts(){// Hardware interrupts
 	
 	// Sensors:
-	//Set up INT0 (pin D0), EX optical sensor #2
+	
+	/* NOTE: Attempting to do without EX or HE interrupts
+	// Set up INT0 (pin D0), EX optical sensor #2
 	EIMSK |= _BV(INT0);
 	EICRA |= _BV(ISC01); // Falling edge interrupt
+	
+	// Set up INT2 (pin D2), HE sensor
+	EIMSK |= _BV(INT2);
+	EICRA |= _BV(ISC21); // Falling edge interrupt
+	*/
 	
 	//Set up INT1 (pin D1), OR optical sensor #1
 	EIMSK |= _BV(INT1);
 	EICRA |= _BV(ISC11) | _BV(ISC10); // Rising edge interrupt
 	
-	//Set up INT2 (pin D2), HE sensor
-	EIMSK |= _BV(INT2);
-	EICRA |= _BV(ISC21); // Falling edge interrupt
 	
 	// Buttons:
-	//Set up INT3 (pin D3), Pause/un-pause, Left button
+	// Set up INT3 (pin D3), Pause/un-pause, Left button
 	EIMSK |= _BV(INT3);
 	EICRA |= _BV(ISC31); // Falling edge interrupt
 	
-	//Set up INT4 (pin D4), Ramp down, Right button
+	// Set up INT4 (pin D4), Ramp down, Right button
 	EIMSK |= _BV(INT4);
 	EICRA |= _BV(ISC41); // Falling edge interrupt
 
@@ -323,11 +328,23 @@ void mTimer(int count){
 
 // INTERRUPTS
 
-ISR(INT0_vect){
+ISR(INT0_vect){ // EX sensor
+	
+}
+
+ISR(INT1_vect){ // OR sensor
+	
+}
+
+ISR(INT2_vect){ // HE sensor
+	
+}
+
+ISR(INT3_vect){ // Left button pressed
 	flagPause = 1;
 }
 
-ISR(INT1_vect){
+ISR(INT4_vect){ // Right button pressed
 	flagRampDown = 1;
 }
 
