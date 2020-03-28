@@ -28,17 +28,18 @@
 #define steelLow 351
 #define alumHigh 350
 #define alumLow 0
-#define TOGGLE_DIRECTION 0 // Change to 1 if conveyor is turning the wrong way
+#define TOGGLE_DIRECTION 1 // Change to 0 if conveyor is turning the wrong way
 
 // GLOBALS
-volatile unsigned int ADC_result = 0xFF;
-volatile char flagADCBusy = 0;
+volatile unsigned int ADC_result;
 volatile char flagProcessing = 0; // Flag to show that the current item is not yet identified
 volatile char flagPause = 0; // 1 for pause or un-pause
 volatile char flagRampDown = 0; // 1 to ramp down
 volatile char flagConveyorStopped = 0; // Lets the program know that the conveyor is stopped and will need restarting.
-int speedDCMotor = 0xFF; // What speed to choose? **** TODO
+int speedDCMotor = 190; // What speed to choose? **** TODO
+int stepperDestination = 0; // Where the stepper is trying to get to **** TODO
 int stepperPos = 0; // Stepper motor position
+int stepperPauseTime = 20; // Time between stepper steps (ms). This value changes for acceleration or deceleration.
 int step = 0; // Ranges from 1-4, and is how the stepper function determines how to rotate
 unsigned int itemsSorted = 0; // # of items sorted
 // TODO **** find out exactly what needs to be tracked for displaying later
@@ -79,34 +80,28 @@ int main(int argc, char *argv[])
 	initStepperPos(); // Initialize stepper position
 	initPWM(); // Start DC motor
 	setupADC(); // Set up reflectivity sensor
+	// waitToStart(); // Waits for a button press to start. Maybe unnecessary
 	sei(); // Enables interrupts
 	
-	// waitToStart(); // Waits for a button press to start. Maybe unnecessary
 	while(1) // Event loop
 	{
+		
+		// If object has left optical sensor, it's time to identify the material
+		// Check - were we just processing a material?
 		// Check OR==high? (optical sensor #1) (Pin D1)
-		if((PIND & 0x01)==0x01){
-			if(!flagADCBusy && !flagConveyorStopped){ // Run a new ADC if it is available and conveyor is moving
-				flagADCBusy = 1;
-				flagProcessing = 1; // Lets us know that we currently are trying to identify an object
-				ADC_result = 0xFF; // Reset value to highest number
-				ADCSRA |= _BV(ADSC); // Triggers new conversion
-			}
-		}else{ // If object has left optical sensor, it's time to identify the material
-			if (flagProcessing){ // Check that we were just processing a material
-				// Take optimal value from the ADC values, identify material, and add to FIFO
-				link *newLink;
-				initLink(newLink);
-				newLink->e.value = getMaterialType(ADC_result);
-				enqueue(&head,&tail,&newLink);
-				flagProcessing = 0;
-			}
+		if (flagProcessing && ((PIND & 0x01)==0x01)){
+			// Take optimal value from the ADC values, identify material, and add to FIFO
+			link *newLink;
+			initLink(&newLink);
+			newLink->e.value = getMaterialType(ADC_result);
+			enqueue(&head,&tail,&newLink); // Add item to FIFO
+			flagProcessing = 0; // We have now finished processing the item
 		}
 		
-		// Check EX==low? (optical sensor #2) (Pin F3)
-		if (((PINF>>3)&1)==0){
-			if(stepperPos == firstValue(&head).value){ // Check if stepper is in correct position yet
-				dequeue(&head,&deQueuedLink);
+		// Check EX==low? (optical sensor #2) (Pin D0)
+		if ((PIND & 0x01)==0){
+			if(stepperPos == stepperDestination){ // Check if stepper is in correct position yet
+				dequeue(&head,&tail,&deQueuedLink); // If so, pop item out of queue
 				free(deQueuedLink);
 				itemsSorted++;
 				
@@ -114,21 +109,29 @@ int main(int argc, char *argv[])
 					setDCMotorSpeed(speedDCMotor);
 					flagConveyorStopped = 0;
 				}
-			}else{
-				setDCMotorSpeed(0); // Stop conveyor while we wait for the stepper to rotate to the correct position.
-				flagConveyorStopped = 1;
 			}
 		}
 		
-		// Check if queue is not empty
-		if (!isEmpty(&head)){
-			if(stepperPos == firstValue(&head).value){
-				rotate(1,1);
+		// Are there still more items on the conveyor?
+		if (!isEmpty(&head)){ // Check if queue is not empty
+			stepperDestination = firstValue(&head).value;
+			if(stepperPos != stepperDestination){ // Check if stepper has the correct bucket position
+				if (abs(stepperDestination-stepperPos) > 100){
+					stepperPauseTime = 10; // TODO these values are arbitrary. Need to use SPS method
+				} else if(abs(stepperDestination-stepperPos) > 50){
+					stepperPauseTime = 15; // TODO these values are arbitrary. Need to use SPS method
+				} else{
+					stepperPauseTime = 20; // TODO these values are arbitrary. Need to use SPS method
+				}
+				rotate(1,1); // rotate the stepper one step
+				// TODO: possibly set a destination variable and have it rotate in the background using Timer2
 				// TODO **** maybe change this later to rotate the optimal direction
 				// Also need to figure out how to accelerate and decelerate. Probably requires doing fancier logic than "move one step".
 			}
 		}else if(flagRampDown) { // If queue is empty, check if we are in ramp down mode
+			mTimer(200); // Give time for last item to make it off of conveyor and into its bucket
 			setDCMotorSpeed(0); // Stop conveyor motor
+			cli(); // Stop all interrupts
 			displaySorted(&head, &tail); // Display info on LCD
 			return 0; // Program end
 		}
@@ -158,10 +161,41 @@ void waitToStart(){ // Runs once at the beginning of program
 } // waitToStart()
 
 void initStepperPos(){
-	// **** TODO
-	// Rotates the stepper motor to find the highest HE value, then rotates from there to the starting position. (Black)
+	// Rotates the stepper motor to find the average position between the two "edges" of hall effect sensor data,
+	//  then rotates from there to the starting position. (Black bucket)
+	stepperPos = 0;
+	int minStep = 0;
+	int maxStep = 0;
+	int flagHE = (PIND>>2)&1;
+	int lastVal = flagHE;
 	
-	rotate(17, 1); // 30 deg cw
+	while(stepperPos<200){ // Finding edges of the HE sensor range, then taking an average
+		if(flagHE){
+			if (lastVal != flagHE){
+				if (flagHE){ // HE sensor just turned on
+					minStep = stepperPos;
+				} else { // HE sensor just turned off
+					maxStep = stepperPos;
+				}
+			}
+			lastVal = flagHE;
+		}
+		rotate(1, 1);// 1 step cw
+		flagHE = (PIND>>2)&1; // HE sensor is on pin D2
+	}
+	if (maxStep < minStep) { // sensor values "wrap around" the bounds of 0-200 steps
+		maxStep += 200; // Extend range since it wraps around. It makes taking the average easier
+	}
+	stepperDestination = (maxStep + minStep)/2;
+	if (stepperDestination > 200){
+		stepperDestination -= 200;
+	}
+	if(stepperDestination < stepperPos){
+		rotate((stepperPos - stepperDestination), 0);
+	}else{
+		rotate((stepperDestination - stepperPos), 1);
+	}
+	stepperPos = 0; // Now we are centered on the black bucket, tare the value
 } // initStepperPos()
 
 void setupADC(){ // TODO **** Change to use 10-bit conversion
@@ -203,20 +237,19 @@ void hwInterrupts(){// Hardware interrupts
 	
 	// Sensors:
 	
-	/* NOTE: Attempting to do without EX or HE interrupts
 	// Set up INT0 (pin D0), EX optical sensor #2
 	EIMSK |= _BV(INT0);
 	EICRA |= _BV(ISC01); // Falling edge interrupt
-	
-	// Set up INT2 (pin D2), HE sensor
-	EIMSK |= _BV(INT2);
-	EICRA |= _BV(ISC21); // Falling edge interrupt
-	*/
 	
 	//Set up INT1 (pin D1), OR optical sensor #1
 	EIMSK |= _BV(INT1);
 	EICRA |= _BV(ISC11) | _BV(ISC10); // Rising edge interrupt
 	
+	/* NOTE: No HE interrupts
+	// Set up INT2 (pin D2), HE sensor
+	EIMSK |= _BV(INT2);
+	EICRA |= _BV(ISC21); // Falling edge interrupt
+	*/
 	
 	// Buttons:
 	// Set up INT3 (pin D3), Pause/un-pause, Left button
@@ -235,14 +268,14 @@ void displaySorted(link **head, link **tail){
 	LCDClear();
 	LCDHome();
 	
-	if (!isEmpty(&head)){
+	if (!isEmpty(head)){
 		// Display stuff about queue items (if required)
 		// **** TODO
 	}
 	// Display stuff about sorted items
 	// TODO ****
 	
-	LCDWriteString("Testing");
+	LCDWriteString("DISPLAY STUFF!");
 	//LCDGotoXY(0,1);
 	//LCDWriteInt(3,4);
 } // displaySorted()
@@ -259,12 +292,13 @@ int getMaterialType(int reflectivity){
 	if(reflectivity>=bwBorder){
 		return 0; // Black
 	}else if(reflectivity>=wsBorder){
-		return 50; // White
+		return 100; // White
 	}else if(reflectivity>=saBorder){
-		return 100; // Steel
+		return 150; // Steel
 	}else{
-		return 150; // Aluminum
+		return 50; // Aluminum
 	}
+	
 } // getMaterialType()
 
 void rotate(int count, char cw /* 1 rotates cw, 0 rotates ccw */){
@@ -276,13 +310,21 @@ void rotate(int count, char cw /* 1 rotates cw, 0 rotates ccw */){
 	for(i=0; i<count; i++){
 		if(step>3){ // Overflow condition
 			step = 0;
-			}else if (step<0){ // Underflow condition
+		}else if (step<0){ // Underflow condition
 			step = 3;
 		} // end if
 		
 		PORTA = step_array[step]; // Set next step for stepper motor
-		cw ? step++ : step--; // Advance to next step in specified direction
-		mTimer(20); // 20ms pause
+		if (cw){ // Advance to next step in specified direction
+			step++;
+			if(stepperPos>200) // Cover overflow condition
+				stepperPos = 0;
+		} else{
+			step--;
+			if(stepperPos<0) // Cover overflow condition
+				stepperPos = 0;
+		}
+		mTimer(stepperPauseTime); // **** TODO this may need adjusted as it could throw off timing of control loop
 	} // end for
 	return;
 } // rotate()
@@ -304,7 +346,7 @@ void updateDCMotorState(){
 		if(!TOGGLE_DIRECTION){
 			// Counter-clockwise (IA)
 			PORTB = 0b11110001; // IA & EA & EB (active low inputs)
-			}else{
+		}else{
 			// Clockwise (IB)
 			PORTB = 0b11110010; // IB & EA & EB (active low inputs)
 		}
@@ -332,16 +374,22 @@ void mTimer(int count){
 // INTERRUPTS
 
 ISR(INT0_vect){ // EX sensor
-	
+	if(stepperPos != stepperDestination){ // Stepper still needs time to get to destination
+		setDCMotorSpeed(0); // Stop conveyor while we wait for the stepper to rotate to the correct position.
+		flagConveyorStopped = 1; // Let other parts of program know we are stopped
+	}
 }
 
 ISR(INT1_vect){ // OR sensor
-	
+	flagProcessing = 1; // Lets us know that we currently are trying to identify an object
+	ADC_result = sizeof(ADC_result); // Reset value to highest number
+	ADCSRA |= _BV(ADSC); // Triggers new ADC conversion
 }
 
+/* NOTE: no interrupt for HE
 ISR(INT2_vect){ // HE sensor
-	
-}
+	flagHE = 1;
+}*/
 
 ISR(INT3_vect){ // Left button pressed
 	flagPause = 1;
@@ -352,10 +400,13 @@ ISR(INT4_vect){ // Right button pressed
 }
 
 ISR(ADC_vect){ // Analog to Digital conversion
-	if(ADCH < ADC_result){ // Want lowest value for highest reflectivity
-		ADC_result = ADCH; // store ADC converted value to ADC_result (0-255)
+	if( ((ADCH<<8)+ADCL) < ADC_result){ // Want lowest value for highest reflectivity
+		ADC_result = (ADCH<<8)+ADCL; // store ADC converted value to ADC_result 
 	}
-	flagADCBusy = 0;
+	// Check OR==high? (optical sensor #1) (Pin D1)
+	if((PIND & 0x01)==0x01){
+		ADCSRA |= _BV(ADSC); // Triggers new ADC conversion
+	}
 }
 
 ISR(BADISR_vect){ // Bad ISR catch statement
