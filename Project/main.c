@@ -19,15 +19,15 @@
 #include "LinkedQueue.h"
 #include "lcd.h"
 
-// CALIBRATION VALUES - Note that the "border" between categories is calculated in a static variable
-#define blackHigh 984
-#define blackLow 972
-#define whiteHigh 966
-#define whiteLow 942
-#define steelHigh 570
-#define steelLow 411
-#define alumHigh 202
-#define alumLow 50
+// CALIBRATION VALUES
+#define blackHigh 1023
+#define blackLow 941
+#define whiteHigh 940
+#define whiteLow 700
+#define steelHigh 699
+#define steelLow 351
+#define alumHigh 350
+#define alumLow 0
 #define TOGGLE_DIRECTION 0 // Change to 1 if conveyor is turning the wrong way
 
 // GLOBALS
@@ -249,15 +249,18 @@ void displaySorted(link **head, link **tail){
 
 int getMaterialType(int reflectivity){
 	// Returns stepper position corresponding to Black, White, Steel, or Aluminum material slots
-	static int bwBorder = (blackLow+whiteHigh)/2;
+	/*static int bwBorder = (blackLow+whiteHigh)/2;
 	static int wsBorder = (whiteLow+steelHigh)/2;
-	static int saBorder = (steelLow+alumHigh)/2;
+	static int saBorder = (steelLow+alumHigh)/2;*/
+	static int bwBorder = blackLow;
+	static int wsBorder = whiteLow;
+	static int saBorder = steelLow;
 	
-	if(reflectivity>bwBorder){
+	if(reflectivity>=bwBorder){
 		return 0; // Black
-	}else if(reflectivity>wsBorder){
+	}else if(reflectivity>=wsBorder){
 		return 50; // White
-	}else if(reflectivity>saBorder){
+	}else if(reflectivity>=saBorder){
 		return 100; // Steel
 	}else{
 		return 150; // Aluminum
