@@ -198,7 +198,7 @@ void initStepperPos(){
 	stepperPos = 0; // Now we are centered on the black bucket, tare the value
 } // initStepperPos()
 
-void setupADC(){ // TODO **** Change to use 10-bit conversion
+void setupADC(){ // TODO **** Change to use 10-bit conversion. Maybe already done by reading ADCL and ADCH???
 	// ADC conversion is used to interpret analog value on pin F0 for reflectivity sensor
 	EICRA |= _BV(ISC21) | _BV(ISC20); // rising edge interrupt
 	ADCSRA |= _BV(ADEN); // enable ADC
@@ -400,8 +400,10 @@ ISR(INT4_vect){ // Right button pressed
 }
 
 ISR(ADC_vect){ // Analog to Digital conversion
-	if( ((ADCH<<8)+ADCL) < ADC_result){ // Want lowest value for highest reflectivity
-		ADC_result = (ADCH<<8)+ADCL; // store ADC converted value to ADC_result 
+	int temp = ADCL;
+	temp += (ADCH<<8);
+	if(temp < ADC_result){ // Want lowest value for highest reflectivity
+		ADC_result = temp; // store ADC converted value to ADC_result 
 	}
 	// Check OR==high? (optical sensor #1) (Pin D1)
 	if((PIND & 0x01)==0x01){
