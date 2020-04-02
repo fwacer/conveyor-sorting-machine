@@ -30,6 +30,12 @@
 #define alumLow 0
 #define TOGGLE_DIRECTION 1 // Change to 0 if conveyor is turning the wrong way
 
+// Step positions of each material bucket
+#define BLACK 0
+#define ALUM 50
+#define WHITE 100
+#define STEEL 150
+
 // GLOBALS
 volatile unsigned int ADC_result;
 volatile char flagProcessing = 0; // Flag to show that the current item is not yet identified
@@ -42,6 +48,10 @@ int stepperPos = 0; // Stepper motor position
 int stepperPauseTime = 20; // Time between stepper steps (ms). This value changes for acceleration or deceleration.
 int step = 0; // Ranges from 1-4, and is how the stepper function determines how to rotate
 unsigned int itemsSorted = 0; // # of items sorted
+unsigned int numBlack = 0; // # black items sorted
+unsigned int numAlum = 0; // # aluminum items sorted
+unsigned int numWhite = 0; // # white items sorted
+unsigned int numSteel = 0;// # steel items sorted
 // TODO **** find out exactly what needs to be tracked for displaying later
 
 // FUNCTION DECLARATIONS
@@ -56,6 +66,7 @@ int getMaterialType(int reflectivity); // Use reflectivity value to determine ma
 void rotate(int count, char cw); // Move stepper motor
 void setDCMotorSpeed(char speed); // Change DC motor speed
 void updateDCMotorState(); // Pause/un-pause motor from turning
+void countSorted(int materialStep); // Keep track of what type of item was just sorted
 void mTimer(int count); // Delay function
 
 // MAIN PROGRAM
@@ -104,7 +115,7 @@ int main(int argc, char *argv[])
 				dequeue(&head,&tail,&deQueuedLink); // If so, pop item out of queue
 				free(deQueuedLink);
 				itemsSorted++;
-				
+				countSorted(stepperDestination);
 				if(flagConveyorStopped){
 					setDCMotorSpeed(speedDCMotor);
 					flagConveyorStopped = 0;
@@ -129,17 +140,27 @@ int main(int argc, char *argv[])
 				// Also need to figure out how to accelerate and decelerate. Probably requires doing fancier logic than "move one step".
 			}
 		}else if(flagRampDown) { // If queue is empty, check if we are in ramp down mode
+			LCDClear();
+			LCDHome();
+			LCDWriteString("Ramping down");
+			
 			mTimer(200); // Give time for last item to make it off of conveyor and into its bucket
 			setDCMotorSpeed(0); // Stop conveyor motor
 			cli(); // Stop all interrupts
+			
 			displaySorted(&head, &tail); // Display info on LCD
 			return 0; // Program end
 		}
 		
 		// Check if we need to pause
 		if (flagPause){ // "Pause" routine
+			LCDClear();
+			LCDHome();
+			LCDWriteString("Paused");
+			
 			mTimer(100); // Large de-bounce
 			flagPause = 0; // Reset pause flag
+			
 			displaySorted(&head, &tail); // Display info on LCD
 			
 			while(!flagPause); // Wait for un-pause button to be pressed
@@ -161,9 +182,18 @@ void waitToStart(){ // Runs once at the beginning of program
 } // waitToStart()
 
 void initStepperPos(){
+	LCDClear();
+	LCDHome();
+	LCDWriteString("Searching...");
 	// Rotates the stepper motor to find the average position between the two "edges" of hall effect sensor data,
 	//  then rotates from there to the starting position. (Black bucket)
 	stepperPos = 0;
+	while((PIND>>2)&1){ // loop while not at black bucket position
+		rotate(1, 1); // 1 step cw
+	}
+	stepperPos = 0; // Now we are centered on the black bucket, tare the value
+	
+	/*stepperPos = 0;
 	int minStep = 0;
 	int maxStep = 0;
 	int flagHE = (PIND>>2)&1;
@@ -196,16 +226,19 @@ void initStepperPos(){
 		rotate((stepperDestination - stepperPos), 1);
 	}
 	stepperPos = 0; // Now we are centered on the black bucket, tare the value
+	*/
+	LCDClear();
+	LCDHome();
+	LCDWriteString("Program Start");
 } // initStepperPos()
 
 void setupADC(){ // TODO **** Change to use 10-bit conversion. Maybe already done by reading ADCL and ADCH???
-	// ADC conversion is used to interpret analog value on pin F0 for reflectivity sensor
-	EICRA |= _BV(ISC21) | _BV(ISC20); // rising edge interrupt
+	// ADC conversion is used to interpret analog value on pin F1 for reflectivity sensor
 	ADCSRA |= _BV(ADEN); // enable ADC
 	ADCSRA |= _BV(ADIE); // enable interrupt of ADC
-	ADMUX |= _BV(ADLAR) | _BV(REFS0);
+	ADMUX |= _BV(REFS0) | _BV(MUX0); // enable ADC pin F1
 	
-	DIDR0 |= 0x01; // Disable all other pins on port F other than pin 0 for analog read
+	DIDR0 |= 0x02; // Disable all other pins on port F other than pin 1 for analog read
 	
 	// ADCSRA |= _BV(ADSC); // initialize the ADC, start one conversion at the beginning
 } // setupADC()
@@ -258,7 +291,7 @@ void hwInterrupts(){// Hardware interrupts
 	
 	// Set up INT4 (pin D4), Ramp down, Right button
 	EIMSK |= _BV(INT4);
-	EICRA |= _BV(ISC41); // Falling edge interrupt
+	EICRB |= _BV(ISC41); // Falling edge interrupt
 
 } // hwInterrupts()
 
@@ -267,17 +300,38 @@ void displaySorted(link **head, link **tail){
 	
 	LCDClear();
 	LCDHome();
+	LCDWriteString("SRT FD PD");
 	
-	if (!isEmpty(head)){
-		// Display stuff about queue items (if required)
-		// **** TODO
-	}
-	// Display stuff about sorted items
-	// TODO ****
+	LCDGotoXY(0,1);
+	LCDWriteInt(itemsSorted,4); // Display number items sorted
 	
-	LCDWriteString("DISPLAY STUFF!");
-	//LCDGotoXY(0,1);
-	//LCDWriteInt(3,4);
+	LCDGotoXY(4,1);
+	LCDWriteInt(size(head, tail),3); // Display number items fully detected
+	
+	LCDGotoXY(7,1);
+	LCDWriteInt(flagProcessing,3); // Display number items partially detected. There should only ever be 1 or 0.
+	mTimer(2000);
+	
+	
+	LCDClear();
+	LCDHome();
+	LCDWriteString("BL AL WH ST #OB");
+	
+	LCDGotoXY(0,1);
+	LCDWriteInt(numBlack,3); // Display number of black in the bin
+
+	LCDGotoXY(3,1);
+	LCDWriteInt(numAlum,3); // Display number of aluminum in the bin
+
+	LCDGotoXY(6,1);
+	LCDWriteInt(numWhite,3); // Display number of white in the bin
+
+	LCDGotoXY(9,1);
+	LCDWriteInt(numSteel,3); // Display number of steel in the bin
+
+	LCDGotoXY(13,1);
+	LCDWriteInt(size(head,tail),3); // Indicate nothing on the belt right now
+	mTimer(3000);
 } // displaySorted()
 
 int getMaterialType(int reflectivity){
@@ -290,13 +344,13 @@ int getMaterialType(int reflectivity){
 	static int saBorder = steelLow;
 	
 	if(reflectivity>=bwBorder){
-		return 0; // Black
+		return BLACK; // Black
 	}else if(reflectivity>=wsBorder){
-		return 100; // White
+		return WHITE; // White
 	}else if(reflectivity>=saBorder){
-		return 150; // Steel
+		return STEEL; // Steel
 	}else{
-		return 50; // Aluminum
+		return ALUM; // Aluminum
 	}
 	
 } // getMaterialType()
@@ -353,6 +407,23 @@ void updateDCMotorState(){
 	}
 } // updateDCMotorState()
 
+void countSorted(int materialStep){
+	switch(materialStep){
+		case BLACK:
+		numBlack++;
+		break;
+		case ALUM:
+		numAlum++;
+		break;
+		case WHITE:
+		numWhite++;
+		break;
+		case STEEL:
+		numSteel++;
+		break;
+	}
+} // countSorted()
+
 void mTimer(int count){
 	// Delay by "n" milliseconds
 	int i = 0; // Index that represents how many milliseconds have passed.
@@ -382,7 +453,7 @@ ISR(INT0_vect){ // EX sensor
 
 ISR(INT1_vect){ // OR sensor
 	flagProcessing = 1; // Lets us know that we currently are trying to identify an object
-	ADC_result = sizeof(ADC_result); // Reset value to highest number
+	ADC_result = 0x400; // Reset value to highest number (10-bit ADC, so max value of ADC is 0x3FF)
 	ADCSRA |= _BV(ADSC); // Triggers new ADC conversion
 }
 
@@ -400,8 +471,7 @@ ISR(INT4_vect){ // Right button pressed
 }
 
 ISR(ADC_vect){ // Analog to Digital conversion
-	int temp = ADCL;
-	temp += (ADCH<<8);
+	int temp = ADC;
 	if(temp < ADC_result){ // Want lowest value for highest reflectivity
 		ADC_result = temp; // store ADC converted value to ADC_result 
 	}
