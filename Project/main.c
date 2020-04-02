@@ -28,7 +28,6 @@
 #define steelLow 351
 #define alumHigh 350
 #define alumLow 0
-#define TOGGLE_DIRECTION 1 // Change to 0 if conveyor is turning the wrong way
 
 // Step positions of each material bucket
 #define BLACK 0
@@ -64,8 +63,8 @@ void hwInterrupts(); // Set up hardware interrupts
 void displaySorted(link **head, link **tail); // LCD display sorted materials data
 int getMaterialType(int reflectivity); // Use reflectivity value to determine material category
 void rotate(int count, char cw); // Move stepper motor
-void setDCMotorSpeed(char speed); // Change DC motor speed
-void updateDCMotorState(); // Pause/un-pause motor from turning
+void setDCMotorSpeed(char speed); // Change DC motor speed - UNUSED
+void updateDCMotorState(char state); // Pause/un-pause motor from turning
 void countSorted(int materialStep); // Keep track of what type of item was just sorted
 void mTimer(int count); // Delay function
 
@@ -115,10 +114,11 @@ int main(int argc, char *argv[])
 				dequeue(&head,&tail,&deQueuedLink); // If so, pop item out of queue
 				free(deQueuedLink);
 				itemsSorted++;
-				countSorted(stepperDestination);
+				countSorted(stepperDestination); // count the type of item sorted
+				
 				if(flagConveyorStopped){
-					setDCMotorSpeed(speedDCMotor);
-					flagConveyorStopped = 0;
+					updateDCMotorState(1); // restart conveyor motor
+					flagConveyorStopped = 0; // reset flag
 				}
 			}
 		}
@@ -145,7 +145,7 @@ int main(int argc, char *argv[])
 			LCDWriteString("Ramping down");
 			
 			mTimer(200); // Give time for last item to make it off of conveyor and into its bucket
-			setDCMotorSpeed(0); // Stop conveyor motor
+			updateDCMotorState(0); // Stop conveyor motor
 			cli(); // Stop all interrupts
 			
 			displaySorted(&head, &tail); // Display info on LCD
@@ -154,6 +154,7 @@ int main(int argc, char *argv[])
 		
 		// Check if we need to pause
 		if (flagPause){ // "Pause" routine
+			updateDCMotorState(0); // Stop DC motor
 			LCDClear();
 			LCDHome();
 			LCDWriteString("Paused");
@@ -163,7 +164,9 @@ int main(int argc, char *argv[])
 			
 			displaySorted(&head, &tail); // Display info on LCD
 			
-			while(!flagPause); // Wait for un-pause button to be pressed
+			while(!flagPause){
+				// Wait for un-pause button to be pressed
+			} 
 			mTimer(100); // Another large de-bounce
 			flagPause = 0; // Reset pause flag
 		}
@@ -260,7 +263,7 @@ void initPWM(){
 	TCCR0B |= _BV(CS01);
 	
 	// Step 5) Set duty cycle
-	OCR0A = 0x80; // 50% duty cycle
+	OCR0A = speedDCMotor;
 	
 	// Step 6)
 	DDRB = 0x80; // Set PWM pin to output (pin 7 on register B)
@@ -388,22 +391,12 @@ void setDCMotorSpeed(char speed){
 	OCR0A = speed;
 } // setDCMotorSpeed()
 
-void updateDCMotorState(){
+void updateDCMotorState(char state){
 	// B0-B4 are IB, IA, EB, EA. Note: EB and EA are always "on" (active low).
-	
-	if (flagPause){
+	if(state == 1){
+		PORTB = 0x02; // Go forward - IB & EA & EB (active low inputs)
+	} else if(state == 0){
 		PORTB = 0x00; // Turn on the DC motor brake
-		flagPause = 0;
-	}else{
-	// NOTE: This may need to actually be CW depending on the physical setup.
-	//		 If so, set TOGGLE_DIRECTION to 1.
-		if(!TOGGLE_DIRECTION){
-			// Counter-clockwise (IA)
-			PORTB = 0b11110001; // IA & EA & EB (active low inputs)
-		}else{
-			// Clockwise (IB)
-			PORTB = 0b11110010; // IB & EA & EB (active low inputs)
-		}
 	}
 } // updateDCMotorState()
 
@@ -446,7 +439,7 @@ void mTimer(int count){
 
 ISR(INT0_vect){ // EX sensor
 	if(stepperPos != stepperDestination){ // Stepper still needs time to get to destination
-		setDCMotorSpeed(0); // Stop conveyor while we wait for the stepper to rotate to the correct position.
+		updateDCMotorState(0); // Stop conveyor while we wait for the stepper to rotate to the correct position.
 		flagConveyorStopped = 1; // Let other parts of program know we are stopped
 	}
 }
