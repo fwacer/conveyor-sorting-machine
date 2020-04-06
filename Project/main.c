@@ -36,12 +36,12 @@
 #define STEEL 150
 
 // GLOBALS
-volatile unsigned int ADC_result;
+volatile unsigned int ADC_result; // Current lowest reflectivity value
 volatile char flagProcessing = 0; // Flag to show that the current item is not yet identified
 volatile char flagPause = 0; // 1 for pause or un-pause
 volatile char flagRampDown = 0; // 1 to ramp down
 volatile char flagConveyorStopped = 0; // Lets the program know that the conveyor is stopped and will need restarting.
-int speedDCMotor = 190; // What speed to choose? **** TODO
+int speedDCMotor = 0x50; // Speed of conveyor
 int stepperDestination = 0; // Where the stepper is trying to get to **** TODO
 int stepperPos = 0; // Stepper motor position
 int stepperPauseTime = 20; // Time between stepper steps (ms). This value changes for acceleration or deceleration.
@@ -68,6 +68,9 @@ void updateDCMotorState(char state); // Pause/un-pause motor from turning
 void countSorted(int materialStep); // Keep track of what type of item was just sorted
 void mTimer(int count); // Delay function
 
+//test functions
+char* getMaterialName(int materialStep);
+
 // MAIN PROGRAM
 int main(int argc, char *argv[])
 {
@@ -77,7 +80,6 @@ int main(int argc, char *argv[])
 	link *deQueuedLink; // Creating one pointer handle to be reused multiple times
 	
 	cli();	// Disables all interrupts
-	PORTB = 0b11110010; // Start motor CCW (inverted pins)
 	TCCR1B |= _BV(CS10); // mTimer setup
 	
 	DDRA = 0xFF; // Stepper motor driver pins
@@ -88,7 +90,8 @@ int main(int argc, char *argv[])
 	
 	InitLCD(0); // Initialize LCD
 	initStepperPos(); // Initialize stepper position
-	initPWM(); // Start DC motor
+	initPWM(); // Set up DC motor PWM
+	updateDCMotorState(1); // Turn on DC motor
 	setupADC(); // Set up reflectivity sensor
 	// waitToStart(); // Waits for a button press to start. Maybe unnecessary
 	sei(); // Enables interrupts
@@ -98,28 +101,39 @@ int main(int argc, char *argv[])
 		
 		// If object has left optical sensor, it's time to identify the material
 		// Check - were we just processing a material?
-		// Check OR==high? (optical sensor #1) (Pin D1)
-		if (flagProcessing && ((PIND & 0x01)==0x01)){
+		// Check OR==low? (optical sensor #1) (Pin D1)
+		if (flagProcessing && ((PIND & 0x01)==0x00)){
 			// Take optimal value from the ADC values, identify material, and add to FIFO
 			link *newLink;
 			initLink(&newLink);
 			newLink->e.value = getMaterialType(ADC_result);
 			enqueue(&head,&tail,&newLink); // Add item to FIFO
 			flagProcessing = 0; // We have now finished processing the item
+			
+			// Testing, verbose code. TODO remove later ****
+			LCDClear();
+			LCDHome();
+			LCDWriteString("Material: ");
+			LCDGotoXY(10,0);
+			LCDWriteString(getMaterialName(ADC_result));
 		}
 		
 		// Check EX==low? (optical sensor #2) (Pin D0)
 		if ((PIND & 0x01)==0){
-			if(stepperPos == stepperDestination){ // Check if stepper is in correct position yet
-				dequeue(&head,&tail,&deQueuedLink); // If so, pop item out of queue
-				free(deQueuedLink);
-				itemsSorted++;
-				countSorted(stepperDestination); // count the type of item sorted
+			if(stepperPos != stepperDestination){ // Check if stepper is in correct position yet
+				updateDCMotorState(0); // stop conveyor motor
+				flagConveyorStopped = 1;
+				rotate( (stepperDestination-stepperPos), (stepperDestination-stepperPos)>0 /*1 for cw, 0 for ccw*/); // rotate to proper position
+			}
+			// We are now guaranteed to be at the correct position
+			dequeue(&head,&tail,&deQueuedLink); // pop item out of queue
+			free(deQueuedLink); // Not sure if this will cause errors, may need to re-allocate deQueuedLink next loop?
+			itemsSorted++;
+			countSorted(stepperDestination); // count the type of item sorted
 				
-				if(flagConveyorStopped){
-					updateDCMotorState(1); // restart conveyor motor
-					flagConveyorStopped = 0; // reset flag
-				}
+			if(flagConveyorStopped){
+				updateDCMotorState(1); // restart conveyor motor
+				flagConveyorStopped = 0; // reset flag
 			}
 		}
 		
@@ -127,13 +141,13 @@ int main(int argc, char *argv[])
 		if (!isEmpty(&head)){ // Check if queue is not empty
 			stepperDestination = firstValue(&head).value;
 			if(stepperPos != stepperDestination){ // Check if stepper has the correct bucket position
-				if (abs(stepperDestination-stepperPos) > 100){
-					stepperPauseTime = 10; // TODO these values are arbitrary. Need to use SPS method
+				/*if (abs(stepperDestination-stepperPos) > 100){
+					stepperPauseTime = 10; // TODO **** these values are arbitrary. Need to use SPS method
 				} else if(abs(stepperDestination-stepperPos) > 50){
-					stepperPauseTime = 15; // TODO these values are arbitrary. Need to use SPS method
+					stepperPauseTime = 15; // TODO **** these values are arbitrary. Need to use SPS method
 				} else{
-					stepperPauseTime = 20; // TODO these values are arbitrary. Need to use SPS method
-				}
+					stepperPauseTime = 20; // TODO **** these values are arbitrary. Need to use SPS method
+				}*/
 				rotate(1,1); // rotate the stepper one step
 				// TODO: possibly set a destination variable and have it rotate in the background using Timer2
 				// TODO **** maybe change this later to rotate the optimal direction
@@ -266,7 +280,7 @@ void initPWM(){
 	OCR0A = speedDCMotor;
 	
 	// Step 6)
-	DDRB = 0x80; // Set PWM pin to output (pin 7 on register B)
+	// DDRB = 0x80; // Set PWM pin to output (pin 7 on register B)
 } // initPWM()
 
 void hwInterrupts(){// Hardware interrupts
@@ -359,7 +373,8 @@ int getMaterialType(int reflectivity){
 } // getMaterialType()
 
 void rotate(int count, char cw /* 1 rotates cw, 0 rotates ccw */){
-	// Rotate the stepper motor by "count" number of steps
+	// Rotate the stepper motor by "count" number of steps. 
+	// Stepper has 200 steps --> 0 to 199
 	int i;
 	// Pin order, MSB first: 0 0 E1 L1 L2 E2 L3 L4
 	static int step_array[] = {0b00110000,0b00000110,0b00101000,0b00000101};
@@ -374,12 +389,12 @@ void rotate(int count, char cw /* 1 rotates cw, 0 rotates ccw */){
 		PORTA = step_array[step]; // Set next step for stepper motor
 		if (cw){ // Advance to next step in specified direction
 			step++;
-			if(stepperPos>200) // Cover overflow condition
+			if(stepperPos>=200) // Cover overflow condition
 				stepperPos = 0;
 		} else{
 			step--;
-			if(stepperPos<0) // Cover overflow condition
-				stepperPos = 0;
+			if(stepperPos<0) // Cover underflow condition
+				stepperPos = 199;
 		}
 		mTimer(stepperPauseTime); // **** TODO this may need adjusted as it could throw off timing of control loop
 	} // end for
@@ -433,6 +448,24 @@ void mTimer(int count){
 		} //end if
 	} //end while
 } // mTimer()
+
+char* getMaterialName(int materialStep){ // temporary test function
+	switch(materialStep){
+		case BLACK:
+		return "BLACK";
+		break;
+		case WHITE:
+		return "WHITE";
+		break;
+		case ALUM:
+		return "ALUM";
+		break;
+		case STEEL:
+		return "STEEL";
+		break;
+	}
+	return "";
+}
 
 
 // INTERRUPTS
