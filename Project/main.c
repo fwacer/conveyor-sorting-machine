@@ -37,6 +37,7 @@
 
 // GLOBALS
 volatile unsigned int ADC_result; // Current lowest reflectivity value
+volatile unsigned int new_ADC_result; // latest reflectivity value
 volatile char flagProcessing = 0; // Flag to show that the current item is not yet identified
 volatile char flagPause = 0; // 1 for pause or un-pause
 volatile char flagRampDown = 0; // 1 to ramp down
@@ -51,7 +52,6 @@ unsigned int numBlack = 0; // # black items sorted
 unsigned int numAlum = 0; // # aluminum items sorted
 unsigned int numWhite = 0; // # white items sorted
 unsigned int numSteel = 0;// # steel items sorted
-// TODO **** find out exactly what needs to be tracked for displaying later
 
 // FUNCTION DECLARATIONS
 void waitToStart();
@@ -85,14 +85,15 @@ int main(int argc, char *argv[])
 	DDRA = 0xFF; // Stepper motor driver pins
 	DDRB = 0xFF; // DC motor driver pins
 	DDRC = 0xFF; // Output LEDs & LCD display
-	DDRD = 0x00; // Button inputs
-	DDRF = 0x00; // Sensor input pins (RL, HE, OR, EX) 
+	DDRD = 0x00; // Button inputs and EX, OR, HE
+	DDRF = 0x00; // Sensor input pin (RL on F1) 
 	
 	InitLCD(0); // Initialize LCD
 	initStepperPos(); // Initialize stepper position
 	initPWM(); // Set up DC motor PWM
 	updateDCMotorState(1); // Turn on DC motor
 	setupADC(); // Set up reflectivity sensor
+	hwInterrupts(); // Set up hardware interrupts
 	// waitToStart(); // Waits for a button press to start. Maybe unnecessary
 	sei(); // Enables interrupts
 	
@@ -102,7 +103,7 @@ int main(int argc, char *argv[])
 		// If object has left optical sensor, it's time to identify the material
 		// Check - were we just processing a material?
 		// Check OR==low? (optical sensor #1) (Pin D1)
-		if (flagProcessing && ((PIND & 0x01)==0x00)){
+		if (flagProcessing && ((PIND & 0x02)==0x00)){
 			// Take optimal value from the ADC values, identify material, and add to FIFO
 			link *newLink;
 			initLink(&newLink);
@@ -115,7 +116,7 @@ int main(int argc, char *argv[])
 			LCDHome();
 			LCDWriteString("Material: ");
 			LCDGotoXY(10,0);
-			LCDWriteString(getMaterialName(ADC_result));
+			LCDWriteString(getMaterialName(getMaterialType(ADC_result)));
 		}
 		
 		// Check EX==low? (optical sensor #2) (Pin D0)
@@ -181,8 +182,12 @@ int main(int argc, char *argv[])
 			while(!flagPause){
 				// Wait for un-pause button to be pressed
 			} 
+			LCDClear();
+			LCDHome();
+			LCDWriteString("Unpaused");
 			mTimer(100); // Another large de-bounce
 			flagPause = 0; // Reset pause flag
+			updateDCMotorState(1);
 		}
 	}
 } // main()
@@ -192,7 +197,7 @@ int main(int argc, char *argv[])
 void waitToStart(){ // Runs once at the beginning of program
 	// Waits for any button to be pressed
 	while(1){
-		if (!((PIND>>1) & 1) || !(PIND & 1)){ // Check left and right buttons, active low
+		if (!((PIND>>3) & 1) || !((PIND>>4) & 1)){ // Check left and right buttons, active low
 			return; // Exit function when any button is pressed
 		}
 	}
@@ -497,12 +502,12 @@ ISR(INT4_vect){ // Right button pressed
 }
 
 ISR(ADC_vect){ // Analog to Digital conversion
-	int temp = ADC;
-	if(temp < ADC_result){ // Want lowest value for highest reflectivity
-		ADC_result = temp; // store ADC converted value to ADC_result 
+	new_ADC_result = ADC;
+	if(new_ADC_result < ADC_result){ // Want lowest value for highest reflectivity
+		ADC_result = new_ADC_result; // store ADC converted value to ADC_result 
 	}
 	// Check OR==high? (optical sensor #1) (Pin D1)
-	if((PIND & 0x01)==0x01){
+	if((PIND & 0x02)==0x02){
 		ADCSRA |= _BV(ADSC); // Triggers new ADC conversion
 	}
 }
