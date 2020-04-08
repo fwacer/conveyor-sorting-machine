@@ -36,22 +36,29 @@
 #define STEEL 150
 
 // GLOBALS
+int step = 0; // Ranges from 1-4, and is how the stepper function determines how to rotate
+int stepperPos = 0; // Stepper motor position
+int stepperDestination = 0; // Where the stepper is trying to get to
 volatile unsigned int ADC_result; // Current lowest reflectivity value
 volatile unsigned int new_ADC_result; // latest reflectivity value
-volatile char flagProcessing = 0; // Flag to show that the current item is not yet identified
-volatile char flagPause = 0; // 1 for pause or un-pause
-volatile char flagRampDown = 0; // 1 to ramp down
-volatile char flagConveyorStopped = 0; // Lets the program know that the conveyor is stopped and will need restarting.
-int speedDCMotor = 0x50; // Speed of conveyor
-int stepperDestination = 0; // Where the stepper is trying to get to **** TODO
-int stepperPos = 0; // Stepper motor position
-int stepperPauseTime = 20; // Time between stepper steps (ms). This value changes for acceleration or deceleration.
-int step = 0; // Ranges from 1-4, and is how the stepper function determines how to rotate
 unsigned int itemsSorted = 0; // # of items sorted
 unsigned int numBlack = 0; // # black items sorted
 unsigned int numAlum = 0; // # aluminum items sorted
 unsigned int numWhite = 0; // # white items sorted
 unsigned int numSteel = 0;// # steel items sorted
+link *head; // Sets up head of queue
+link *tail;	// Sets up tail of queue
+link *deQueuedLink; // Creating one pointer handle to be reused multiple times
+
+// FLAGS
+volatile char flagProcessing = 0; // Flag to show that the current item is not yet identified
+volatile char flagPause = 0; // 1 for paused , 0 for un-paused
+volatile char flagRampDown = 0; // 1 to ramp down
+volatile char flagConveyorStopped = 0; // Lets the program know that the conveyor is stopped and will need restarting.
+
+// CONSTANTS
+int speedDCMotor = 0x50; // Speed of conveyor
+int stepperPauseTime = 20; // Time between stepper steps (ms). This value changes for acceleration or deceleration.
 
 // FUNCTION DECLARATIONS
 void waitToStart();
@@ -74,10 +81,7 @@ char* getMaterialName(int materialStep);
 // MAIN PROGRAM
 int main(int argc, char *argv[])
 {
-	link *head; // Sets up head of queue
-	link *tail;	// Sets up tail of queue
 	setup(&head, &tail); // Set up queue
-	link *deQueuedLink; // Creating one pointer handle to be reused multiple times
 	
 	cli();	// Disables all interrupts
 	TCCR1B |= _BV(CS10); // mTimer setup
@@ -118,26 +122,7 @@ int main(int argc, char *argv[])
 			LCDGotoXY(10,0);
 			LCDWriteString(getMaterialName(getMaterialType(ADC_result)));
 		}
-		
-		// Check EX==low? (optical sensor #2) (Pin D0)
-		if ((PIND & 0x01)==0){
-			if(stepperPos != stepperDestination){ // Check if stepper is in correct position yet
-				updateDCMotorState(0); // stop conveyor motor
-				flagConveyorStopped = 1;
-				rotate( (stepperDestination-stepperPos), (stepperDestination-stepperPos)>0 /*1 for cw, 0 for ccw*/); // rotate to proper position
-			}
-			// We are now guaranteed to be at the correct position
-			dequeue(&head,&tail,&deQueuedLink); // pop item out of queue
-			free(deQueuedLink); // Not sure if this will cause errors, may need to re-allocate deQueuedLink next loop?
-			itemsSorted++;
-			countSorted(stepperDestination); // count the type of item sorted
 				
-			if(flagConveyorStopped){
-				updateDCMotorState(1); // restart conveyor motor
-				flagConveyorStopped = 0; // reset flag
-			}
-		}
-		
 		// Are there still more items on the conveyor?
 		if (!isEmpty(&head)){ // Check if queue is not empty
 			stepperDestination = firstValue(&head).value;
@@ -149,7 +134,7 @@ int main(int argc, char *argv[])
 				} else{
 					stepperPauseTime = 20; // TODO **** these values are arbitrary. Need to use SPS method
 				}*/
-				rotate(1,1); // rotate the stepper one step
+				rotate(1,(stepperDestination-stepperPos)>0); // rotate the stepper one step in proper direction
 				// TODO: possibly set a destination variable and have it rotate in the background using Timer2
 				// TODO **** maybe change this later to rotate the optimal direction
 				// Also need to figure out how to accelerate and decelerate. Probably requires doing fancier logic than "move one step".
@@ -172,21 +157,15 @@ int main(int argc, char *argv[])
 			updateDCMotorState(0); // Stop DC motor
 			LCDClear();
 			LCDHome();
-			LCDWriteString("Paused");
-			
-			mTimer(100); // Large de-bounce
-			flagPause = 0; // Reset pause flag
-			
+			LCDWriteString("Paused");			
 			displaySorted(&head, &tail); // Display info on LCD
 			
-			while(!flagPause){
-				// Wait for un-pause button to be pressed
+			while(flagPause){
+				// Wait for pause/unpause button to be toggled off
 			} 
 			LCDClear();
 			LCDHome();
 			LCDWriteString("Unpaused");
-			mTimer(100); // Another large de-bounce
-			flagPause = 0; // Reset pause flag
 			updateDCMotorState(1);
 		}
 	}
@@ -476,9 +455,23 @@ char* getMaterialName(int materialStep){ // temporary test function
 // INTERRUPTS
 
 ISR(INT0_vect){ // EX sensor
+	stepperDestination = firstValue(&head).value;
 	if(stepperPos != stepperDestination){ // Stepper still needs time to get to destination
 		updateDCMotorState(0); // Stop conveyor while we wait for the stepper to rotate to the correct position.
 		flagConveyorStopped = 1; // Let other parts of program know we are stopped
+		rotate( (stepperDestination-stepperPos), (stepperDestination-stepperPos)>0 /*1 for cw, 0 for ccw*/); // rotate to proper position
+		// TODO: Add "width" around each stepper destination for faster bucket dropping ****
+	}
+	
+	// We are now guaranteed to be at the correct position
+	dequeue(&head,&tail,&deQueuedLink); // pop item out of queue
+	free(deQueuedLink); // Not sure if this will cause errors, may need to re-allocate deQueuedLink next loop?
+	itemsSorted++;
+	countSorted(stepperDestination); // count the type of item sorted
+	
+	if(flagConveyorStopped){
+		updateDCMotorState(1); // restart conveyor motor
+		flagConveyorStopped = 0; // reset flag
 	}
 }
 
@@ -494,7 +487,7 @@ ISR(INT2_vect){ // HE sensor
 }*/
 
 ISR(INT3_vect){ // Left button pressed
-	flagPause = 1;
+	flagPause = !flagPause;
 }
 
 ISR(INT4_vect){ // Right button pressed
