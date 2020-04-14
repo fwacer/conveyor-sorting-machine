@@ -6,4 +6,5 @@ The system sorts 4 different types of objects into categories: black plastic, wh
 
 This project was finished over email because the Covid-19 pandemic closed down the labs before the project end. We did all project troubleshooting and design by emailing a circuit schematic and our latest revision of code into the lab instructor, who would test it for us. There was a lag time of as many as a few days between sending an iteration of code and getting a response back. 
 This video was our final response received, with all project milestones reached. Thank you to the lab instructor, Patrick, for all his tireless efforts in seeing this project through.
+
 Video Demonstration: https://youtu.be/xK0sNJgQ82g
