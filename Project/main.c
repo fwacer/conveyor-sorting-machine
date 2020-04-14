@@ -35,10 +35,18 @@
 #define WHITE 100
 #define STEEL 150
 
+// Stepper micro-steps. Pin order (MSB first): 0 0 E1 L1 L2 E2 L3 L4
+#define E1 0b00100000
+#define L1 0b00010000
+#define L2 0b00001000
+#define E2 0b00000100
+#define L3 0b00000010
+#define L4 0b00000001
+
 // GLOBALS
-int step = 0; // Ranges from 1-4, and is how the stepper function determines how to rotate
-int stepperPos = 0; // Stepper motor position
-int stepperDestination = 0; // Where the stepper is trying to get to
+volatile int step = 0; // Ranges from 1-4, and is how the stepper function determines how to rotate
+volatile int stepperPos = 0; // Stepper motor position
+volatile int stepperDestination = 0; // Where the stepper is trying to get to
 volatile unsigned int ADC_result; // Current lowest reflectivity value
 volatile unsigned int new_ADC_result; // latest reflectivity value
 unsigned int itemsSorted = 0; // # of items sorted
@@ -55,6 +63,7 @@ volatile char flagProcessing = 0; // Flag to show that the current item is not y
 volatile char flagPause = 0; // 1 for paused , 0 for un-paused
 volatile char flagRampDown = 0; // 1 to ramp down
 volatile char flagConveyorStopped = 0; // Lets the program know that the conveyor is stopped and will need restarting.
+volatile char flagDumping = 0; // Are we currently dumping an object into its corresponding bucket?
 
 // CONSTANTS
 int speedDCMotor = 0x50; // Speed of conveyor
@@ -106,7 +115,7 @@ int main(int argc, char *argv[])
 		
 		// If object has left optical sensor, it's time to identify the material
 		// Check - were we just processing a material?
-		// Check OR==low? (optical sensor #1) (Pin D1)
+		// Check OR==low? (not being activated) (optical sensor #1) (Pin D1)
 		if (flagProcessing && ((PIND & 0x02)==0x00)){
 			// Take optimal value from the ADC values, identify material, and add to FIFO
 			link *newLink;
@@ -124,20 +133,22 @@ int main(int argc, char *argv[])
 		}
 				
 		// Are there still more items on the conveyor?
-		if (!isEmpty(&head)){ // Check if queue is not empty
-			stepperDestination = firstValue(&head).value;
-			if(stepperPos != stepperDestination){ // Check if stepper has the correct bucket position
-				/*if (abs(stepperDestination-stepperPos) > 100){
-					stepperPauseTime = 10; // TODO **** these values are arbitrary. Need to use SPS method
-				} else if(abs(stepperDestination-stepperPos) > 50){
-					stepperPauseTime = 15; // TODO **** these values are arbitrary. Need to use SPS method
-				} else{
-					stepperPauseTime = 20; // TODO **** these values are arbitrary. Need to use SPS method
-				}*/
-				rotate(1,(stepperDestination-stepperPos)>0); // rotate the stepper one step in proper direction
-				// TODO: possibly set a destination variable and have it rotate in the background using Timer2
-				// TODO **** maybe change this later to rotate the optimal direction
-				// Also need to figure out how to accelerate and decelerate. Probably requires doing fancier logic than "move one step".
+		if (!isEmpty(&head)){ // Check if queue still has items in it
+			if (PIND & 1){ // Ensure that the last sorted item has left EX (which is active low)			
+				stepperDestination = firstValue(&head).value;
+				if(stepperPos != stepperDestination){ // Check if stepper has the correct bucket position
+					char cw = 1; // Clockwise 1, ccw if 0.
+					int dx = stepperDestination-stepperPos;
+					if (dx<0){
+						dx = -dx; // same as abs()
+						cw = !cw; // Change the direction because of negative
+					}
+					if (dx > 100){
+						cw = !cw; // Change the direction, it's faster to go the other way
+					}
+					rotate( 1, cw /*1 for cw, 0 for ccw*/); // rotate the stepper one step in proper direction
+					// TODO: Possibly use Timer2 and the "stepperPauseTime" to accelerate/decelerate. ****
+				}
 			}
 		}else if(flagRampDown) { // If queue is empty, check if we are in ramp down mode
 			LCDClear();
@@ -157,7 +168,22 @@ int main(int argc, char *argv[])
 			updateDCMotorState(0); // Stop DC motor
 			LCDClear();
 			LCDHome();
-			LCDWriteString("Paused");			
+			LCDWriteString("Paused");
+			
+			if(stepperPos != stepperDestination){ // Let stepper finish rotating
+				char cw = 1; // Clockwise 1, ccw if 0.
+				int dx = stepperDestination-stepperPos;
+				if (dx<0){
+					dx = -dx;
+					cw = !cw;
+				}
+				if (dx > 100){
+					dx = 200 - dx;
+					cw = !cw;
+				}
+				rotate( dx, cw /*1 for cw, 0 for ccw*/); // Finish rotating to proper position
+			}
+			
 			displaySorted(&head, &tail); // Display info on LCD
 			
 			while(flagPause){
@@ -192,48 +218,15 @@ void initStepperPos(){
 	while((PIND>>2)&1){ // loop while not at black bucket position
 		rotate(1, 1); // 1 step cw
 	}
+	rotate(4,0); // 4 steps ccw correction
 	stepperPos = 0; // Now we are centered on the black bucket, tare the value
 	
-	/*stepperPos = 0;
-	int minStep = 0;
-	int maxStep = 0;
-	int flagHE = (PIND>>2)&1;
-	int lastVal = flagHE;
-	
-	while(stepperPos<200){ // Finding edges of the HE sensor range, then taking an average
-		if(flagHE){
-			if (lastVal != flagHE){
-				if (flagHE){ // HE sensor just turned on
-					minStep = stepperPos;
-				} else { // HE sensor just turned off
-					maxStep = stepperPos;
-				}
-			}
-			lastVal = flagHE;
-		}
-		rotate(1, 1);// 1 step cw
-		flagHE = (PIND>>2)&1; // HE sensor is on pin D2
-	}
-	if (maxStep < minStep) { // sensor values "wrap around" the bounds of 0-200 steps
-		maxStep += 200; // Extend range since it wraps around. It makes taking the average easier
-	}
-	stepperDestination = (maxStep + minStep)/2;
-	if (stepperDestination > 200){
-		stepperDestination -= 200;
-	}
-	if(stepperDestination < stepperPos){
-		rotate((stepperPos - stepperDestination), 0);
-	}else{
-		rotate((stepperDestination - stepperPos), 1);
-	}
-	stepperPos = 0; // Now we are centered on the black bucket, tare the value
-	*/
 	LCDClear();
 	LCDHome();
 	LCDWriteString("Program Start");
 } // initStepperPos()
 
-void setupADC(){ // TODO **** Change to use 10-bit conversion. Maybe already done by reading ADCL and ADCH???
+void setupADC(){
 	// ADC conversion is used to interpret analog value on pin F1 for reflectivity sensor
 	ADCSRA |= _BV(ADEN); // enable ADC
 	ADCSRA |= _BV(ADIE); // enable interrupt of ADC
@@ -299,21 +292,26 @@ void hwInterrupts(){// Hardware interrupts
 void displaySorted(link **head, link **tail){
 	// Displays information on LCD about sorted items, and items in the queue
 	
+	// 1st "page" of display
 	LCDClear();
 	LCDHome();
-	LCDWriteString("SRT FD PD");
+	LCDWriteString("SRT FD PD"); // # Objects sorted, # Objects fully detected, # Objects partially detected
 	
 	LCDGotoXY(0,1);
-	LCDWriteInt(itemsSorted,4); // Display number items sorted
+	LCDWriteInt(itemsSorted,4); // Display number total items sorted
 	
 	LCDGotoXY(4,1);
-	LCDWriteInt(size(head, tail),3); // Display number items fully detected
+	LCDWriteInt(size(head, tail)+itemsSorted,3); // Display number items fully detected //TODO**** Not sure if this is correct
 	
 	LCDGotoXY(7,1);
 	LCDWriteInt(flagProcessing,3); // Display number items partially detected. There should only ever be 1 or 0.
-	mTimer(2000);
+	int i = 2000;
+	while((i>0) && (flagRampDown || flagPause)){ // Exits if the pause flag gets turned off
+		 mTimer(100); // wait 2s
+		 i -= 100;
+	}
 	
-	
+	// 2nd "page" of display
 	LCDClear();
 	LCDHome();
 	LCDWriteString("BL AL WH ST #OB");
@@ -331,8 +329,12 @@ void displaySorted(link **head, link **tail){
 	LCDWriteInt(numSteel,3); // Display number of steel in the bin
 
 	LCDGotoXY(13,1);
-	LCDWriteInt(size(head,tail),3); // Indicate nothing on the belt right now
-	mTimer(3000);
+	LCDWriteInt(size(head,tail),3); // Indicate how many detected items are on the belt on the belt right now
+	i = 3000;
+	while((i>0) && (flagRampDown || flagPause)){ // Exits if the pause flag gets turned off
+		mTimer(100); // wait 3s
+		i -= 100;
+	}
 } // displaySorted()
 
 int getMaterialType(int reflectivity){
@@ -359,30 +361,63 @@ int getMaterialType(int reflectivity){
 void rotate(int count, char cw /* 1 rotates cw, 0 rotates ccw */){
 	// Rotate the stepper motor by "count" number of steps. 
 	// Stepper has 200 steps --> 0 to 199
-	int i;
-	// Pin order, MSB first: 0 0 E1 L1 L2 E2 L3 L4
-	static int step_array[] = {0b00110000,0b00000110,0b00101000,0b00000101};
+	// const static int step_array[] = {0b00110000,0b00000110,0b00101000,0b00000101}; // Micro-steps. Pin order (MSB first): 0 0 E1 L1 L2 E2 L3 L4
+	const static int step_array[] = {(E1|L1 | E2|L3), (E2|L3 | E1|L2), (E1|L2 | E2|L4),(E2|L4 | E1|L1)}; // Dual phase excitation
 	
-	for(i=0; i<count; i++){
-		if(step>3){ // Overflow condition
+	const static int stepperPauseLong = 20; // Slowest speed
+	const static int stepperPauseShort = 10; // Fastest speed
+	const static int bufferSteps = (stepperPauseLong - stepperPauseShort); // # of steps from destination when stepper starts to slow down
+	
+	int i;
+	count = abs(count); // Only take magnitude of "count"
+	for(i=0; i<count; i++){ // Runs for "count" steps
+		// Stepper Position
+		if (cw){ // Advance to next step in specified direction
+			step++;
+			if((stepperPos+1)>=200){ // Cover position overflow condition
+				stepperPos = 0;
+				}else{
+				stepperPos += 1;
+			}
+			} else{
+			step--;
+			if((stepperPos-1)<0){ // Cover position underflow condition
+				stepperPos = 199;
+				}else{
+				stepperPos -= 1;
+			}
+		}
+		
+		// Stepper Micro-steps
+		if(step>3){ // Step overflow condition
 			step = 0;
-		}else if (step<0){ // Underflow condition
+			} else if(step<0){ // Step underflow condition
 			step = 3;
 		} // end if
 		
-		PORTA = step_array[step]; // Set next step for stepper motor
-		if (cw){ // Advance to next step in specified direction
-			step++;
-			if(stepperPos>=200) // Cover overflow condition
-				stepperPos = 0;
-		} else{
-			step--;
-			if(stepperPos<0) // Cover underflow condition
-				stepperPos = 199;
+		// Find how far we are from the destination
+		// This code is repeated elsewhere in the program. This would run faster if we instead only computed it once, but that will take restructuring.
+		int dx = stepperDestination-stepperPos;
+		if (dx<0){
+			dx = -dx;
 		}
-		mTimer(stepperPauseTime); // **** TODO this may need adjusted as it could throw off timing of control loop
+		if (dx > 100){
+			dx = 200 - dx;
+		}
+		
+		// Acceleration & De-acceleration
+		if ((stepperPauseTime > stepperPauseShort) && (dx > bufferSteps)){ // Acceleration zone
+			stepperPauseTime -= 1; // Speed up (delay less time)
+		}else if((stepperPauseTime < stepperPauseLong) && (dx < bufferSteps)){ // De-acceleration zone
+			stepperPauseTime += 1; // Speed down (delay more time)
+		}
+		
+		// Stepper Movement
+		PORTA = step_array[step]; // Take next step for stepper motor
+		mTimer(stepperPauseTime); // Variable speed pause	
+		// mTimer(20); // Constant stepper speed
+		
 	} // end for
-	return;
 } // rotate()
 
 void setDCMotorSpeed(char speed){
@@ -459,7 +494,17 @@ ISR(INT0_vect){ // EX sensor
 	if(stepperPos != stepperDestination){ // Stepper still needs time to get to destination
 		updateDCMotorState(0); // Stop conveyor while we wait for the stepper to rotate to the correct position.
 		flagConveyorStopped = 1; // Let other parts of program know we are stopped
-		rotate( (stepperDestination-stepperPos), (stepperDestination-stepperPos)>0 /*1 for cw, 0 for ccw*/); // rotate to proper position
+		char cw = 1; // Clockwise 1, ccw if 0.
+		int dx = stepperDestination-stepperPos;
+		if (dx<0){
+			dx = -dx;
+			cw = !cw;
+		}
+		if (dx > 100){
+			dx = 200 - dx;
+			cw = !cw;
+		}
+		rotate( dx, cw /*1 for cw, 0 for ccw*/); // rotate to proper position
 		// TODO: Add "width" around each stepper destination for faster bucket dropping ****
 	}
 	
@@ -507,6 +552,7 @@ ISR(ADC_vect){ // Analog to Digital conversion
 
 ISR(BADISR_vect){ // Bad ISR catch statement
 	LCDClear();
+	LCDHome();
 	LCDWriteStringXY(1,1,"BAD ISR");
 	while(1){
 		// Stay here, there's an error.
